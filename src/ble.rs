@@ -1,10 +1,14 @@
+use core::cell::RefCell;
 use defmt::{info, unwrap};
+use embassy::blocking_mutex::ThreadModeMutex;
+use embassy::time::{Duration, Timer};
 use embassy_nrf::gpio::{self, AnyPin};
 use embassy_nrf::gpiote::{AnyChannel, InputChannel};
 use embedded_hal::digital::v2::OutputPin;
 use futures::FutureExt;
 use nrf_softdevice::ble::{gatt_server, peripheral};
 use nrf_softdevice::{raw, Softdevice};
+use panic_probe as _;
 
 // define a bluetooth service with one characteristic we can write and read to
 #[nrf_softdevice::gatt_service(uuid = "9e7312e0-2354-11eb-9f10-fbc30a62cf38")]
@@ -18,13 +22,25 @@ struct Server {
     my_service: MyService,
 }
 
+// tasks in same executor guaranteed to not be running at same time as they cant interupt eachother
+static SERVER: ThreadModeMutex<RefCell<Option<Server>>> = ThreadModeMutex::new(RefCell::new(None));
+
+static GREEN_LED: ThreadModeMutex<RefCell<Option<gpio::Output<'static, AnyPin>>>> =
+    ThreadModeMutex::new(RefCell::new(None));
+
 #[embassy::task]
 pub async fn bluetooth_task(
     sd: &'static Softdevice,
     button1: InputChannel<'static, AnyChannel, AnyPin>,
     mut blue: gpio::Output<'static, AnyPin>,
+    green: gpio::Output<'static, AnyPin>,
 ) {
     let server: Server = unwrap!(gatt_server::register(sd));
+
+    // going to share these with multiple futures which will be created and
+    // destroyed complicating lifetimes otherwise
+    SERVER.borrow().replace(Some(server));
+    GREEN_LED.borrow().replace(Some(green));
 
     #[rustfmt::skip]
     let adv_data = &[
@@ -32,57 +48,89 @@ pub async fn bluetooth_task(
         0x03, 0x03, 0x09, 0x18,
         0x0a, 0x09, b'H', b'e', b'l', b'l', b'o', b'R', b'u', b's', b't',
     ];
+
     #[rustfmt::skip]
     let scan_data = &[
         0x03, 0x03, 0x09, 0x18,
     ];
 
     let config = peripheral::Config::default();
-
     info!("Bluetooth is OFF");
     info!("Press puck.js button to enable, press again to disconnect");
 
     'waiting: loop {
+        // set green led off
+        if let Some(green) = GREEN_LED.borrow().borrow_mut().as_mut() {
+            unwrap!(green.set_low())
+        }
+
         // wait here until button is pressed
         button1.wait().await;
 
-        info!("advertising!");
+        'advertising: loop {
+            info!("advertising!");
 
-        let adv = peripheral::ConnectableAdvertisement::ScannableUndirected {
-            adv_data,
-            scan_data,
-        };
+            let adv = peripheral::ConnectableAdvertisement::ScannableUndirected {
+                adv_data,
+                scan_data,
+            };
 
-        let conn_future = peripheral::advertise_connectable(sd, adv, &config);
+            let conn_future = peripheral::advertise_connectable(sd, adv, &config);
 
-        // instead of await to run one future, well select to run both futures until first one returns
-        let conn = futures::select_biased! {
-            // connection returns if somebody connects
-            conn = conn_future.fuse() => unwrap!(conn),
-            // button returns if pressed and well go back to top of loop
-            _ = button1.wait().fuse() => {info!("stopping"); continue 'waiting;},
-        };
+            // instead of await to run one future, well race several futures
+            let conn = futures::select_biased! {
+                // blink led to show advertising status, doesnt actually return
+                _ = blinky_task().fuse() => continue 'waiting,
+                // button returns if pressed stopping advertising and returning back to waiting state
+                _ = button1.wait().fuse() => {info!("stopping"); continue 'waiting;},
+                // connection returns if somebody connects continuing execution
+                conn = conn_future.fuse() => unwrap!(conn),
+            };
 
-        let gatt_future = gatt_server::run(&conn, &server, |e| match e {
-            ServerEvent::MyService(e) => match e {
-                MyServiceEvent::MyCharWrite(val) => {
-                    if val > 0 {
-                        unwrap!(blue.set_low());
-                    } else {
-                        unwrap!(blue.set_high());
-                    }
-                    info!("wrote my_char: {}", val);
-                }
-            },
-        });
+            // enable green led to indicate a connection
+            if let Some(green) = GREEN_LED.borrow().borrow_mut().as_mut() {
+                unwrap!(green.set_high())
+            }
 
-        // instead of await to run one future, well select to run both futures until first one returns
-        futures::select_biased! {
-            // gatt returns if connection drops
-            r = gatt_future.fuse() => info!("disconnected {}", r),
-            // button returns if pressed
-            _ = button1.wait().fuse() => info!("disconnecting"),
-        };
+            info!("connected!");
+
+            if let Some(server) = SERVER.borrow().borrow().as_ref() {
+                // Run the GATT server on the connection. This returns when the connection gets disconnected.
+                let gatt_fut = gatt_server::run(&conn, server, |e| match e {
+                    ServerEvent::MyService(e) => match e {
+                        MyServiceEvent::MyCharWrite(val) => {
+                            if val > 0 {
+                                unwrap!(blue.set_low());
+                            } else {
+                                unwrap!(blue.set_high());
+                            }
+                            info!("wrote my_char: {}", val);
+                        }
+                    },
+                });
+
+                futures::select_biased! {
+                    // gatt returns if connection and goes back to advertising
+                    _ = gatt_fut.fuse() => continue 'advertising,
+                    // button returns if pressed and stops advertising
+                    _ = button1.wait().fuse() => continue 'waiting,
+                };
+            }
+        }
+    }
+}
+
+async fn blinky_task() {
+    loop {
+        if let Some(green) = GREEN_LED.borrow().borrow_mut().as_mut() {
+            unwrap!(green.set_high())
+        }
+        Timer::after(Duration::from_millis(1000)).await;
+
+        if let Some(green) = GREEN_LED.borrow().borrow_mut().as_mut() {
+            unwrap!(green.set_low())
+        }
+        Timer::after(Duration::from_millis(1000)).await;
     }
 }
 
