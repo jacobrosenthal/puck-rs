@@ -1,5 +1,6 @@
 //! http://www.espruino.com/Puck.js
 //! http://www.espruino.com/img/PUCKJS_.jpg
+//! https://github.com/espruino/Espruino/blob/2e101fdb78b99b883ad627a2908e797e841494d9/libs/puckjs/jswrap_puck.c
 //!
 //! p0.00 btn1
 //! p0.01 d1
@@ -28,6 +29,7 @@ use defmt::{info, unwrap};
 use embassy::executor::Spawner;
 use embassy_nrf::gpio::{self, Pin};
 use embassy_nrf::gpiote::{self, Channel};
+use embassy_nrf::saadc::{self, Saadc};
 use embassy_nrf::{interrupt, Peripherals};
 use nrf_softdevice::Softdevice;
 use nrf_softdevice_s132::{sd_power_dcdc_mode_set, NRF_POWER_DCDC_MODES_NRF_POWER_DCDC_ENABLE};
@@ -67,11 +69,18 @@ async fn main(spawner: Spawner, dp: Peripherals) {
         gpio::OutputDrive::Standard,
     );
 
+    let mut config = saadc::Config::default();
+    // must change battery calculation if resolution changes
+    config.resolution = saadc::Resolution::_14BIT;
+    let irq = interrupt::take!(SAADC);
+    let channel_config = saadc::ChannelConfig::single_ended(saadc::VddInput);
+    let saadc = Saadc::new(dp.SAADC, irq, config, [channel_config]);
+
     // tell the executor to start each of our tasks
     unwrap!(spawner.spawn(softdevice_task(sd)));
     // note this unwrap! macro is just like .unwrap() you're used to, but for
     // various reasons has less size for microcontrollers
-    unwrap!(spawner.spawn(bluetooth_task(sd, button1, blue, green)));
+    unwrap!(spawner.spawn(bluetooth_task(sd, button1, blue, green, saadc)));
 }
 
 // 0 is Highest. Lower prio number can preempt higher prio number

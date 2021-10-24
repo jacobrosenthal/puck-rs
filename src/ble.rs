@@ -4,6 +4,7 @@ use embassy::blocking_mutex::ThreadModeMutex;
 use embassy::time::{Duration, Timer};
 use embassy_nrf::gpio::{self, AnyPin};
 use embassy_nrf::gpiote::{AnyChannel, InputChannel};
+use embassy_nrf::saadc;
 use embedded_hal::digital::v2::OutputPin;
 use futures::FutureExt;
 use nrf_softdevice::ble::{gatt_server, peripheral};
@@ -17,13 +18,23 @@ struct MyService {
     my_char: u8,
 }
 
+#[nrf_softdevice::gatt_service(uuid = "180f")]
+struct BatteryService {
+    #[characteristic(uuid = "2a19", read, notify)]
+    battery_level: u8,
+}
+
 #[nrf_softdevice::gatt_server]
 struct Server {
+    bas_service: BatteryService,
     my_service: MyService,
 }
 
 // tasks in same executor guaranteed to not be running at same time as they cant interupt eachother
 static SERVER: ThreadModeMutex<RefCell<Option<Server>>> = ThreadModeMutex::new(RefCell::new(None));
+
+static SAADC: ThreadModeMutex<RefCell<Option<saadc::Saadc<'static, 1>>>> =
+    ThreadModeMutex::new(RefCell::new(None));
 
 static GREEN_LED: ThreadModeMutex<RefCell<Option<gpio::Output<'static, AnyPin>>>> =
     ThreadModeMutex::new(RefCell::new(None));
@@ -34,6 +45,7 @@ pub async fn bluetooth_task(
     button1: InputChannel<'static, AnyChannel, AnyPin>,
     mut blue: gpio::Output<'static, AnyPin>,
     green: gpio::Output<'static, AnyPin>,
+    saadc: saadc::Saadc<'static, 1>,
 ) {
     let server: Server = unwrap!(gatt_server::register(sd));
 
@@ -41,6 +53,7 @@ pub async fn bluetooth_task(
     // destroyed complicating lifetimes otherwise
     SERVER.borrow().replace(Some(server));
     GREEN_LED.borrow().replace(Some(green));
+    SAADC.borrow().replace(Some(saadc));
 
     #[rustfmt::skip]
     let adv_data = &[
@@ -96,7 +109,12 @@ pub async fn bluetooth_task(
 
             if let Some(server) = SERVER.borrow().borrow().as_ref() {
                 // Run the GATT server on the connection. This returns when the connection gets disconnected.
-                let gatt_fut = gatt_server::run(&conn, server, |e| match e {
+                let gatt_future = gatt_server::run(&conn, server, |e| match e {
+                    ServerEvent::BasService(e) => match e {
+                        BatteryServiceEvent::BatteryLevelCccdWrite { notifications } => {
+                            info!("battery notifications: {}", notifications)
+                        }
+                    },
                     ServerEvent::MyService(e) => match e {
                         MyServiceEvent::MyCharWrite(val) => {
                             if val > 0 {
@@ -110,8 +128,10 @@ pub async fn bluetooth_task(
                 });
 
                 futures::select_biased! {
+                    // battery never returns
+                    _ = battery_task().fuse() => (),
                     // gatt returns if connection and goes back to advertising
-                    _ = gatt_fut.fuse() => continue 'advertising,
+                    _ = gatt_future.fuse() => continue 'advertising,
                     // button returns if pressed and stops advertising
                     _ = button1.wait().fuse() => continue 'waiting,
                 };
@@ -131,6 +151,37 @@ async fn blinky_task() {
             unwrap!(green.set_low())
         }
         Timer::after(Duration::from_millis(1000)).await;
+    }
+}
+
+// Gain = (1/6) REFERENCE = (0.6 V) RESOLUTION = 14bits
+// Max Input = (0.6 V)/(1/6) = 3.6 V
+// ADC RESULT = [V(p)- V(n)] * (GAIN/REFERENCE) * 2^(RESOLUTION)
+// ADC RESULT = [V(p) - 0] * 2^(RESOLUTION) * (GAIN/REFERENCE)
+// ADC RESULT = V(p) * 2^(RESOLUTION) * (GAIN/REFERENCE)
+// ADC RESULT = V(p) * 16384 * (1/6)/(3/5)
+// ADC RESULT = V(p) * 16384 * (5/18)
+// ADC RESULT = V(p) * 81920 / 18
+// V(p) = ADC RESULT * 18 / 81920
+// Percentage = V(p) * 100 / Max Input
+// Percentage = (ADC RESULT * 1800 / 81920 ) / 3.6
+// Percentage = ADC RESULT * 500 / 81920
+async fn battery_task() {
+    loop {
+        if let (Some(server), Some(saadc)) = (
+            SERVER.borrow().borrow().as_ref(),
+            SAADC.borrow().borrow_mut().as_mut(),
+        ) {
+            let mut battery = [0; 1];
+            saadc.sample(&mut battery).await;
+
+            let percentage = (battery[0] as u32 * 500 / 81920) as u8;
+
+            defmt::info!("{}%", percentage);
+
+            unwrap!(server.bas_service.battery_level_set(percentage));
+        }
+        Timer::after(Duration::from_secs(60)).await;
     }
 }
 
