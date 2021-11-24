@@ -20,8 +20,7 @@ SUBSYSTEM=="usb", ATTR{idVendor}=="0d28", ATTR{idProduct}=="0204", MODE:="666"
 Finally we'll need a softdevice
 
 - Download [SoftDevice S132](https://www.nordicsemi.com/Products/Development-software/S132/Download) from Nordic. Supported versions are 7.x.x
-- `probe-rs-cli erase --chip nRF52832_xxAA`
-- `probe-rs-cli download --format hex s132_nrf52_7.3.0_softdevice.hex --chip nRF52832_xxAA`
+- `probe-rs-cli download --format hex s132_nrf52_7.3.0_softdevice.hex --chip nRF52832_xxAA --chip-erase`
 
 ## Flashing
 
