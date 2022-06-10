@@ -12,9 +12,9 @@ use nrf_softdevice::{raw, Softdevice};
 
 // define a bluetooth service with one characteristic we can write and read to
 #[nrf_softdevice::gatt_service(uuid = "9e7312e0-2354-11eb-9f10-fbc30a62cf38")]
-struct MyService {
+struct LedService {
     #[characteristic(uuid = "9e7312e0-2354-11eb-9f10-fbc30a63cf38", read, write)]
-    my_char: u8,
+    led: u8,
 }
 
 #[nrf_softdevice::gatt_service(uuid = "180f")]
@@ -26,7 +26,7 @@ struct BatteryService {
 #[nrf_softdevice::gatt_server]
 struct Server {
     bas_service: BatteryService,
-    my_service: MyService,
+    led_service: LedService,
 }
 
 // tasks in same executor guaranteed to not be running at same time as they cant interupt eachother
@@ -115,14 +115,14 @@ pub async fn bluetooth_task(sd: &'static Softdevice) {
                             info!("battery notifications: {}", notifications)
                         }
                     },
-                    ServerEvent::MyService(e) => match e {
-                        MyServiceEvent::MyCharWrite(val) => {
+                    ServerEvent::LedService(e) => match e {
+                        LedServiceEvent::LedWrite(val) => {
                             if val > 0 {
                                 blue.set_high()
                             } else {
                                 blue.set_low()
                             }
-                            info!("wrote my_char: {}", val);
+                            info!("wrote led: {}", val);
                         }
                     },
                 });
