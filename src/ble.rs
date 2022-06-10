@@ -5,11 +5,9 @@ use embassy::time::{Duration, Timer};
 use embassy_nrf::gpio::{self, AnyPin};
 use embassy_nrf::gpiote::{AnyChannel, InputChannel};
 use embassy_nrf::saadc;
-use embedded_hal::digital::v2::OutputPin;
 use futures::FutureExt;
 use nrf_softdevice::ble::{gatt_server, peripheral};
 use nrf_softdevice::{raw, Softdevice};
-use panic_probe as _;
 
 // define a bluetooth service with one characteristic we can write and read to
 #[nrf_softdevice::gatt_service(uuid = "9e7312e0-2354-11eb-9f10-fbc30a62cf38")]
@@ -74,7 +72,7 @@ pub async fn bluetooth_task(
     'waiting: loop {
         // set green led off
         if let Some(green) = GREEN_LED.borrow().borrow_mut().as_mut() {
-            unwrap!(green.set_low())
+            green.set_low()
         }
 
         // wait here until button is pressed
@@ -102,7 +100,7 @@ pub async fn bluetooth_task(
 
             // enable green led to indicate a connection
             if let Some(green) = GREEN_LED.borrow().borrow_mut().as_mut() {
-                unwrap!(green.set_high())
+                green.set_high()
             }
 
             info!("connected!");
@@ -118,9 +116,9 @@ pub async fn bluetooth_task(
                     ServerEvent::MyService(e) => match e {
                         MyServiceEvent::MyCharWrite(val) => {
                             if val > 0 {
-                                unwrap!(blue.set_low());
+                                blue.set_low()
                             } else {
-                                unwrap!(blue.set_high());
+                                blue.set_high()
                             }
                             info!("wrote my_char: {}", val);
                         }
@@ -143,12 +141,12 @@ pub async fn bluetooth_task(
 async fn blinky_task() {
     loop {
         if let Some(green) = GREEN_LED.borrow().borrow_mut().as_mut() {
-            unwrap!(green.set_high())
+            green.set_high()
         }
         Timer::after(Duration::from_millis(1000)).await;
 
         if let Some(green) = GREEN_LED.borrow().borrow_mut().as_mut() {
-            unwrap!(green.set_low())
+            green.set_low()
         }
         Timer::after(Duration::from_millis(1000)).await;
     }

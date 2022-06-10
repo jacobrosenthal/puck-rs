@@ -21,22 +21,25 @@ defmt-error = []
 ble-gatt-server = ["nrf-softdevice/ble-gatt-server"]
 
 [dependencies]
-embassy = { version = "0.1.0", features = ["defmt"] }
-embassy-traits = { version = "0.1.0", features = ["defmt"] }
-embassy-nrf = { version = "0.1.0", features = [
+embassy = { version = "0.1.0", git = "https://github.com/embassy-rs/embassy", features = [
+    "defmt",
+    "unstable-traits",
+] }
+embassy-nrf = { version = "0.1.0", git = "https://github.com/embassy-rs/embassy", features = [
+    "nightly",
+    "unstable-traits",
     "defmt",
     "nrf52832",
-    "time-driver-rtc1",
-    "gpiote"
+    "gpiote",
+    "time-driver-rtc1"
 ] }
 cortex-m = { version = "0.7.3" }
 cortex-m-rt = "0.7.0"
-defmt = { version = "0.2.3" }
+defmt = { version = "0.3.2" }
+panic-probe = { version = "0.3.0", features = ["print-defmt"] }
 nrf-softdevice-defmt-rtt = { version = "0.1.0" }
-panic-probe = { version = "0.2.1", features = ["print-defmt"] }
 nrf-softdevice = { version = "0.1.0", features = [
     "defmt",
-    "defmt-trace",
     "nrf52832",
     "s132",
     "ble-peripheral",
@@ -49,12 +52,14 @@ futures = { version = "0.3.17", default-features = false, features = [
 fixed = "1.10.0"
 heapless = "0.7.7"
 embedded-hal = "0.2.6"
+embedded-hal-async = { version = "0.1.0-alpha.1" }
 
 [patch.crates-io]
 embassy = { git = "https://github.com/embassy-rs/embassy" }
 embassy-nrf = { git = "https://github.com/embassy-rs/embassy" }
 embassy-macros = { git = "https://github.com/embassy-rs/embassy" }
-embassy-traits = { git = "https://github.com/embassy-rs/embassy" }
+embedded-hal-async = { git = "https://github.com/rust-embedded/embedded-hal" }
+embedded-hal = { git = "https://github.com/rust-embedded/embedded-hal" }
 nrf-softdevice-defmt-rtt = { git = "https://github.com/embassy-rs/nrf-softdevice" }
 nrf-softdevice = { git = "https://github.com/embassy-rs/nrf-softdevice" }
 nrf-softdevice-s132 = { git = "https://github.com/embassy-rs/nrf-softdevice" }
