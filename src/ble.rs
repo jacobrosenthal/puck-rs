@@ -34,7 +34,7 @@ static SERVER: ThreadModeMutex<RefCell<Option<Server>>> = ThreadModeMutex::new(R
 
 #[embassy::task]
 pub async fn bluetooth_task(sd: &'static Softdevice) {
-    let dp = unsafe { <embassy_nrf::Peripherals as embassy::util::Steal>::steal() };
+    let mut dp = unsafe { <embassy_nrf::Peripherals as embassy::util::Steal>::steal() };
 
     let server: Server = unwrap!(gatt_server::register(sd));
 
@@ -45,12 +45,6 @@ pub async fn bluetooth_task(sd: &'static Softdevice) {
         dp.GPIOTE_CH1.degrade(),
         gpio::Input::new(dp.P0_00.degrade(), gpio::Pull::Down),
         gpiote::InputChannelPolarity::HiToLo,
-    );
-
-    let mut blue = gpio::Output::new(
-        dp.P0_03.degrade(),
-        gpio::Level::Low,
-        gpio::OutputDrive::Standard,
     );
 
     // going to share these with multiple futures which will be created and
@@ -98,12 +92,14 @@ pub async fn bluetooth_task(sd: &'static Softdevice) {
                 Either::Second(conn) => unwrap!(conn),
             };
 
-            let dp = unsafe { <embassy_nrf::Peripherals as embassy::util::Steal>::steal() };
             let _green = gpio::Output::new(
-                dp.P0_04.degrade(),
+                &mut dp.P0_04,
                 gpio::Level::High,
                 gpio::OutputDrive::Standard,
             );
+
+            let mut blue =
+                gpio::Output::new(&mut dp.P0_03, gpio::Level::Low, gpio::OutputDrive::Standard);
 
             info!("connected!");
 
@@ -153,15 +149,15 @@ pub async fn bluetooth_task(sd: &'static Softdevice) {
 // Percentage = (ADC RESULT * 1800 / 81920 ) / 3.6
 // Percentage = ADC RESULT * 500 / 81920
 async fn battery_task() {
+    let mut dp = unsafe { <embassy_nrf::Peripherals as embassy::util::Steal>::steal() };
+    let mut irq = interrupt::take!(SAADC);
     loop {
         if let Some(server) = SERVER.borrow().borrow().as_ref() {
-            let dp = unsafe { <embassy_nrf::Peripherals as embassy::util::Steal>::steal() };
             let mut config = saadc::Config::default();
             // must change battery calculation if resolution changes
             config.resolution = saadc::Resolution::_14BIT;
-            let irq = interrupt::take!(SAADC);
             let channel_config = saadc::ChannelConfig::single_ended(saadc::VddInput);
-            let mut saadc = Saadc::new(dp.SAADC, irq, config, [channel_config]);
+            let mut saadc = Saadc::new(&mut dp.SAADC, &mut irq, config, [channel_config]);
 
             let mut battery = [0; 1];
             saadc.sample(&mut battery).await;
