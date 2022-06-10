@@ -2,11 +2,11 @@ use core::cell::RefCell;
 use defmt::{info, unwrap};
 use embassy::blocking_mutex::ThreadModeMutex;
 use embassy::time::{Duration, Timer};
-use embassy_nrf::gpio::{self, AnyPin, Pin};
+use embassy::util::{select, select3, Either, Either3};
+use embassy_nrf::gpio::{self, Pin};
 use embassy_nrf::gpiote::{self, Channel};
 use embassy_nrf::interrupt;
 use embassy_nrf::saadc::{self, Saadc};
-use futures::FutureExt;
 use nrf_softdevice::ble::{gatt_server, peripheral};
 use nrf_softdevice::{raw, Softdevice};
 
@@ -88,13 +88,14 @@ pub async fn bluetooth_task(sd: &'static Softdevice) {
             let conn_future = peripheral::advertise_connectable(sd, adv, &config);
 
             // instead of await to run one future, well race several futures
-            let conn = futures::select_biased! {
-                // blink led to show advertising status, doesnt actually return
-                _ = blinky_task(&mut green).fuse() => continue 'waiting,
+            let conn = match select(button1.wait(), conn_future).await {
                 // button returns if pressed stopping advertising and returning back to waiting state
-                _ = button1.wait().fuse() => {info!("stopping"); continue 'waiting;},
+                Either::First(_) => {
+                    info!("stopping");
+                    continue 'waiting;
+                }
                 // connection returns if somebody connects continuing execution
-                conn = conn_future.fuse() => unwrap!(conn),
+                Either::Second(conn) => unwrap!(conn),
             };
 
             let dp = unsafe { <embassy_nrf::Peripherals as embassy::util::Steal>::steal() };
@@ -117,35 +118,25 @@ pub async fn bluetooth_task(sd: &'static Softdevice) {
                     ServerEvent::MyService(e) => match e {
                         MyServiceEvent::MyCharWrite(val) => {
                             if val > 0 {
-                                blue.set_low()
-                            } else {
                                 blue.set_high()
+                            } else {
+                                blue.set_low()
                             }
                             info!("wrote my_char: {}", val);
                         }
                     },
                 });
 
-                futures::select_biased! {
+                match select3(battery_task(), gatt_future, button1.wait()).await {
                     // battery never returns
-                    _ = battery_task().fuse() => (),
+                    Either3::First(_) => {}
                     // gatt returns if connection and goes back to advertising
-                    _ = gatt_future.fuse() => continue 'advertising,
+                    Either3::Second(_) => continue 'advertising,
                     // button returns if pressed and stops advertising
-                    _ = button1.wait().fuse() => continue 'waiting,
-                };
+                    Either3::Third(_) => continue 'waiting,
+                }
             }
         }
-    }
-}
-
-async fn blinky_task(green: &mut gpio::Output<'static, AnyPin>) {
-    loop {
-        green.set_high();
-        Timer::after(Duration::from_millis(1000)).await;
-
-        green.set_low();
-        Timer::after(Duration::from_millis(1000)).await;
     }
 }
 
