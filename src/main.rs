@@ -27,15 +27,12 @@ mod ble;
 use ble::{bluetooth_task, softdevice_config, softdevice_task};
 use defmt::{info, unwrap};
 use embassy::executor::Spawner;
-use embassy_nrf::gpio::{self, Pin};
-use embassy_nrf::gpiote::{self, Channel};
-use embassy_nrf::saadc::{self, Saadc};
 use embassy_nrf::{interrupt, Peripherals};
 use nrf_softdevice::Softdevice;
 use nrf_softdevice_s132::{sd_power_dcdc_mode_set, NRF_POWER_DCDC_MODES_NRF_POWER_DCDC_ENABLE};
 
 #[embassy::main(config = "embassy_config()")]
-async fn main(spawner: Spawner, dp: Peripherals) {
+async fn main(spawner: Spawner, _dp: Peripherals) {
     // well use these logging macros instead of println to tunnel our logs via the debug chip
     info!("Hello World!");
 
@@ -48,39 +45,11 @@ async fn main(spawner: Spawner, dp: Peripherals) {
         sd_power_dcdc_mode_set(NRF_POWER_DCDC_MODES_NRF_POWER_DCDC_ENABLE as u8);
     }
 
-    // button presses will be delivered on HiToLo or when you release the button
-    let button1 = gpiote::InputChannel::new(
-        // degrade just a typesystem hack to forget which pin it is so we can
-        // call it Anypin and make our function calls more generic
-        dp.GPIOTE_CH1.degrade(),
-        gpio::Input::new(dp.P0_00.degrade(), gpio::Pull::Down),
-        gpiote::InputChannelPolarity::HiToLo,
-    );
-
-    let blue = gpio::Output::new(
-        dp.P0_03.degrade(),
-        gpio::Level::Low,
-        gpio::OutputDrive::Standard,
-    );
-
-    let green = gpio::Output::new(
-        dp.P0_04.degrade(),
-        gpio::Level::Low,
-        gpio::OutputDrive::Standard,
-    );
-
-    let mut config = saadc::Config::default();
-    // must change battery calculation if resolution changes
-    config.resolution = saadc::Resolution::_14BIT;
-    let irq = interrupt::take!(SAADC);
-    let channel_config = saadc::ChannelConfig::single_ended(saadc::VddInput);
-    let saadc = Saadc::new(dp.SAADC, irq, config, [channel_config]);
-
     // tell the executor to start each of our tasks
     unwrap!(spawner.spawn(softdevice_task(sd)));
     // note this unwrap! macro is just like .unwrap() you're used to, but for
     // various reasons has less size for microcontrollers
-    unwrap!(spawner.spawn(bluetooth_task(sd, button1, blue, green, saadc)));
+    unwrap!(spawner.spawn(bluetooth_task(sd)));
 }
 
 // 0 is Highest. Lower prio number can preempt higher prio number

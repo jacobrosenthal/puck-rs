@@ -2,9 +2,10 @@ use core::cell::RefCell;
 use defmt::{info, unwrap};
 use embassy::blocking_mutex::ThreadModeMutex;
 use embassy::time::{Duration, Timer};
-use embassy_nrf::gpio::{self, AnyPin};
-use embassy_nrf::gpiote::{AnyChannel, InputChannel};
-use embassy_nrf::saadc;
+use embassy_nrf::gpio::{self, AnyPin, Pin};
+use embassy_nrf::gpiote::{self, Channel};
+use embassy_nrf::interrupt;
+use embassy_nrf::saadc::{self, Saadc};
 use futures::FutureExt;
 use nrf_softdevice::ble::{gatt_server, peripheral};
 use nrf_softdevice::{raw, Softdevice};
@@ -31,27 +32,30 @@ struct Server {
 // tasks in same executor guaranteed to not be running at same time as they cant interupt eachother
 static SERVER: ThreadModeMutex<RefCell<Option<Server>>> = ThreadModeMutex::new(RefCell::new(None));
 
-static SAADC: ThreadModeMutex<RefCell<Option<saadc::Saadc<'static, 1>>>> =
-    ThreadModeMutex::new(RefCell::new(None));
-
-static GREEN_LED: ThreadModeMutex<RefCell<Option<gpio::Output<'static, AnyPin>>>> =
-    ThreadModeMutex::new(RefCell::new(None));
-
 #[embassy::task]
-pub async fn bluetooth_task(
-    sd: &'static Softdevice,
-    button1: InputChannel<'static, AnyChannel, AnyPin>,
-    mut blue: gpio::Output<'static, AnyPin>,
-    green: gpio::Output<'static, AnyPin>,
-    saadc: saadc::Saadc<'static, 1>,
-) {
+pub async fn bluetooth_task(sd: &'static Softdevice) {
+    let dp = unsafe { <embassy_nrf::Peripherals as embassy::util::Steal>::steal() };
+
     let server: Server = unwrap!(gatt_server::register(sd));
+
+    // button presses will be delivered on HiToLo or when you release the button
+    let button1 = gpiote::InputChannel::new(
+        // degrade just a typesystem hack to forget which pin it is so we can
+        // call it Anypin and make our function calls more generic
+        dp.GPIOTE_CH1.degrade(),
+        gpio::Input::new(dp.P0_00.degrade(), gpio::Pull::Down),
+        gpiote::InputChannelPolarity::HiToLo,
+    );
+
+    let mut blue = gpio::Output::new(
+        dp.P0_03.degrade(),
+        gpio::Level::Low,
+        gpio::OutputDrive::Standard,
+    );
 
     // going to share these with multiple futures which will be created and
     // destroyed complicating lifetimes otherwise
     SERVER.borrow().replace(Some(server));
-    GREEN_LED.borrow().replace(Some(green));
-    SAADC.borrow().replace(Some(saadc));
 
     #[rustfmt::skip]
     let adv_data = &[
@@ -70,11 +74,6 @@ pub async fn bluetooth_task(
     info!("Press puck.js button to enable, press again to disconnect");
 
     'waiting: loop {
-        // set green led off
-        if let Some(green) = GREEN_LED.borrow().borrow_mut().as_mut() {
-            green.set_low()
-        }
-
         // wait here until button is pressed
         button1.wait().await;
 
@@ -91,17 +90,19 @@ pub async fn bluetooth_task(
             // instead of await to run one future, well race several futures
             let conn = futures::select_biased! {
                 // blink led to show advertising status, doesnt actually return
-                _ = blinky_task().fuse() => continue 'waiting,
+                _ = blinky_task(&mut green).fuse() => continue 'waiting,
                 // button returns if pressed stopping advertising and returning back to waiting state
                 _ = button1.wait().fuse() => {info!("stopping"); continue 'waiting;},
                 // connection returns if somebody connects continuing execution
                 conn = conn_future.fuse() => unwrap!(conn),
             };
 
-            // enable green led to indicate a connection
-            if let Some(green) = GREEN_LED.borrow().borrow_mut().as_mut() {
-                green.set_high()
-            }
+            let dp = unsafe { <embassy_nrf::Peripherals as embassy::util::Steal>::steal() };
+            let _green = gpio::Output::new(
+                dp.P0_04.degrade(),
+                gpio::Level::High,
+                gpio::OutputDrive::Standard,
+            );
 
             info!("connected!");
 
@@ -138,16 +139,12 @@ pub async fn bluetooth_task(
     }
 }
 
-async fn blinky_task() {
+async fn blinky_task(green: &mut gpio::Output<'static, AnyPin>) {
     loop {
-        if let Some(green) = GREEN_LED.borrow().borrow_mut().as_mut() {
-            green.set_high()
-        }
+        green.set_high();
         Timer::after(Duration::from_millis(1000)).await;
 
-        if let Some(green) = GREEN_LED.borrow().borrow_mut().as_mut() {
-            green.set_low()
-        }
+        green.set_low();
         Timer::after(Duration::from_millis(1000)).await;
     }
 }
@@ -166,10 +163,15 @@ async fn blinky_task() {
 // Percentage = ADC RESULT * 500 / 81920
 async fn battery_task() {
     loop {
-        if let (Some(server), Some(saadc)) = (
-            SERVER.borrow().borrow().as_ref(),
-            SAADC.borrow().borrow_mut().as_mut(),
-        ) {
+        if let Some(server) = SERVER.borrow().borrow().as_ref() {
+            let dp = unsafe { <embassy_nrf::Peripherals as embassy::util::Steal>::steal() };
+            let mut config = saadc::Config::default();
+            // must change battery calculation if resolution changes
+            config.resolution = saadc::Resolution::_14BIT;
+            let irq = interrupt::take!(SAADC);
+            let channel_config = saadc::ChannelConfig::single_ended(saadc::VddInput);
+            let mut saadc = Saadc::new(dp.SAADC, irq, config, [channel_config]);
+
             let mut battery = [0; 1];
             saadc.sample(&mut battery).await;
 
