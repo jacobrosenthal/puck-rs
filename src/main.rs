@@ -14,7 +14,9 @@
 //! p0.09 nfc
 //! p0.10 nfc
 //!
-//! cargo run --release
+//! p0.18 mag vdd
+//!
+//! DEFMT_LOG=trace cargo run --release
 
 #![no_main]
 #![no_std]
@@ -40,7 +42,12 @@ async fn main(spawner: Spawner, _dp: Peripherals) {
     let config = softdevice_config();
     let sd = Softdevice::enable(&config);
 
-    // save battery
+    // disable onboard devices for power, doesnt seem to do much
+    // let _mag_vdd = gpio::Output::new(&mut dp.P0_18, gpio::Level::Low, gpio::OutputDrive::Standard);
+    // let _temp_vdd = gpio::Output::new(&mut dp.P0_08, gpio::Level::Low, gpio::OutputDrive::Standard);
+    //ir pins seem to be left as inputs in espruino so I dont think those matter..
+
+    // save battery, does dcdc make sense without an external ldo?
     unsafe {
         sd_power_dcdc_mode_set(NRF_POWER_DCDC_MODES_NRF_POWER_DCDC_ENABLE as u8);
     }

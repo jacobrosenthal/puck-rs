@@ -1,11 +1,12 @@
 use core::cell::RefCell;
+
 use defmt::{info, unwrap};
 use embassy::blocking_mutex::ThreadModeMutex;
 use embassy::time::{Duration, Timer};
 use embassy::util::{select, select3, Either, Either3};
 use embassy_nrf::gpio::{self, Pin};
 use embassy_nrf::gpiote::{self, Channel};
-use embassy_nrf::interrupt;
+use embassy_nrf::interrupt::{self, SAADC};
 use embassy_nrf::saadc::{self, Saadc};
 use nrf_softdevice::ble::{gatt_server, peripheral};
 use nrf_softdevice::{raw, Softdevice};
@@ -35,6 +36,7 @@ static SERVER: ThreadModeMutex<RefCell<Option<Server>>> = ThreadModeMutex::new(R
 #[embassy::task]
 pub async fn bluetooth_task(sd: &'static Softdevice) {
     let mut dp = unsafe { <embassy_nrf::Peripherals as embassy::util::Steal>::steal() };
+    let mut saadc_irq = interrupt::take!(SAADC);
 
     let server: Server = unwrap!(gatt_server::register(sd));
 
@@ -44,7 +46,7 @@ pub async fn bluetooth_task(sd: &'static Softdevice) {
         // call it Anypin and make our function calls more generic
         dp.GPIOTE_CH1.degrade(),
         gpio::Input::new(dp.P0_00.degrade(), gpio::Pull::Down),
-        gpiote::InputChannelPolarity::HiToLo,
+        gpiote::InputChannelPolarity::LoToHi,
     );
 
     // going to share these with multiple futures which will be created and
@@ -123,11 +125,11 @@ pub async fn bluetooth_task(sd: &'static Softdevice) {
                     },
                 });
 
-                match select3(battery_task(), gatt_future, button1.wait()).await {
+                match select3(battery_task(&mut saadc_irq), gatt_future, button1.wait()).await {
                     // battery never returns
                     Either3::First(_) => {}
-                    // gatt returns if connection and goes back to advertising
-                    Either3::Second(_) => continue 'advertising,
+                    // gatt returns if connection and goes stops advertising
+                    Either3::Second(_) => continue 'waiting,
                     // button returns if pressed and stops advertising
                     Either3::Third(_) => continue 'waiting,
                 }
@@ -136,40 +138,48 @@ pub async fn bluetooth_task(sd: &'static Softdevice) {
     }
 }
 
-// Gain = (1/6) REFERENCE = (0.6 V) RESOLUTION = 14bits
-// Max Input = (0.6 V)/(1/6) = 3.6 V
-// ADC RESULT = [V(p)- V(n)] * (GAIN/REFERENCE) * 2^(RESOLUTION)
-// ADC RESULT = [V(p) - 0] * 2^(RESOLUTION) * (GAIN/REFERENCE)
-// ADC RESULT = V(p) * 2^(RESOLUTION) * (GAIN/REFERENCE)
-// ADC RESULT = V(p) * 16384 * (1/6)/(3/5)
-// ADC RESULT = V(p) * 16384 * (5/18)
-// ADC RESULT = V(p) * 81920 / 18
-// V(p) = ADC RESULT * 18 / 81920
-// Percentage = V(p) * 100 / Max Input
-// Percentage = (ADC RESULT * 1800 / 81920 ) / 3.6
-// Percentage = ADC RESULT * 500 / 81920
-async fn battery_task() {
+// Gain = (1/6) REFERENCE = (0.6 V or 6/10) RESOLUTION = 14bits
+// Max InputV = (6/10)/(1/6) = 36/10 or 3600mv
+// bat_min_mv = 2200
+// VBAT_MV_PER_LSB = Max Input/ 2^RESOLUTION
+// VBAT_MV_PER_LSB = 3600/16384
+// mv = raw * VBAT_MV_PER_LSB
+// mv = (3600 * raw)/16384
+
+async fn battery_task(saadc_irq: &mut SAADC) {
     let mut dp = unsafe { <embassy_nrf::Peripherals as embassy::util::Steal>::steal() };
-    let mut irq = interrupt::take!(SAADC);
     loop {
         if let Some(server) = SERVER.borrow().borrow().as_ref() {
             let mut config = saadc::Config::default();
             // must change battery calculation if resolution changes
             config.resolution = saadc::Resolution::_14BIT;
             let channel_config = saadc::ChannelConfig::single_ended(saadc::VddInput);
-            let mut saadc = Saadc::new(&mut dp.SAADC, &mut irq, config, [channel_config]);
+            let mut saadc = Saadc::new(&mut dp.SAADC, &mut *saadc_irq, config, [channel_config]);
 
             let mut battery = [0; 1];
             saadc.sample(&mut battery).await;
+            defmt::info!("{}", battery[0] as u32);
 
-            let percentage = (battery[0] as u32 * 500 / 81920) as u8;
+            let mv = battery[0] as u32 * 3600 / 16384;
+            defmt::info!("{}mv", mv);
 
+            let percentage = percent_from_mv::<2200, 3000>(mv);
             defmt::info!("{}%", percentage);
 
             unwrap!(server.bas_service.battery_level_set(percentage));
         }
         Timer::after(Duration::from_secs(60)).await;
     }
+}
+
+pub fn percent_from_mv<const MIN: u32, const MAX: u32>(mv: u32) -> u8 {
+    debug_assert!(MAX > MIN);
+    let mv = mv.min(MAX);
+    let mv = mv.max(MIN + 1);
+    let percent = (100 * (mv - MIN)) / (MAX - MIN);
+
+    // SAFETY: has to be between 0 and 99
+    percent as u8
 }
 
 #[embassy::task]
@@ -183,7 +193,7 @@ pub fn softdevice_config() -> nrf_softdevice::Config {
             source: raw::NRF_CLOCK_LF_SRC_RC as u8,
             rc_ctiv: 16,
             rc_temp_ctiv: 2,
-            accuracy: raw::NRF_CLOCK_LF_ACCURACY_20_PPM as u8,
+            accuracy: raw::NRF_CLOCK_LF_ACCURACY_250_PPM as u8,
         }),
         conn_gap: Some(raw::ble_gap_conn_cfg_t {
             conn_count: 1,
